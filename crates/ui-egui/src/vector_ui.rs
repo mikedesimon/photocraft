@@ -1939,3 +1939,7 @@ mod paint_tests;
 #[cfg(test)]
 #[path = "shape_pick_tests.rs"]
 mod shape_pick_tests;
+
+#[cfg(test)]
+#[path = "shape_point_edit_tests.rs"]
+mod shape_point_edit_tests;
