@@ -503,9 +503,36 @@ pub(crate) fn free_transform_path(app: &PhotocraftApp) -> Option<(Value, Path)> 
     Some((params, path))
 }
 
+/// "Select: All Layers" with Path Selection or Direct Selection: a press first selects the shape
+/// layer under the pointer (`shape.pickAt`), so the drag that follows edits it. Direct Selection
+/// keeps the paths it already shows first: a press on one of their anchors, handles or segments
+/// edits that path even where another shape lies on top. Pen + ⌘ never picks.
+pub fn pick_shape_on_press(app: &mut PhotocraftApp, p: [f64; 2]) {
+    let tool = app.ui.tool;
+    app.ui.path_pick_missed = false;
+    if !matches!(tool, Tool::PathSelection | Tool::DirectSelection)
+        || !app.ui.tool_options.path_select_all
+        || app.ui.vector_mask_target
+        || app.ui.transform.is_some()
+    {
+        return;
+    }
+    let tol = 6.0 / f64::from(app.point_zoom().max(0.01));
+    if tool == Tool::DirectSelection && crate::direct_select::hits_shown_path(app, p, tol) {
+        return;
+    }
+    match app.run("shape.pickAt", json!({"x": p[0], "y": p[1], "tolerance": tol})) {
+        Ok(v) => app.ui.path_pick_missed = tool == Tool::PathSelection && v["layer"].is_null(),
+        Err(e) => {
+            app.ui.status = e;
+            app.ui.status_error = true;
+        }
+    }
+}
+
 pub fn path_selection_finish(app: &mut PhotocraftApp, start: [f64; 2], end: [f64; 2]) {
     let (dx, dy) = (end[0] - start[0], end[1] - start[1]);
-    if dx.abs() + dy.abs() < 0.5 {
+    if dx.abs() + dy.abs() < 0.5 || std::mem::take(&mut app.ui.path_pick_missed) {
         return;
     }
     let Some((target, path)) = target_path(app) else { return };
@@ -678,7 +705,20 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, tool: Tool) -> bo
         ui.label(egui::RichText::new(s).color(t.text_dim).size(12.0));
     };
     let o = &mut app.ui.tool_options;
+    if matches!(tool, Tool::PathSelection | Tool::DirectSelection) {
+        // Photoshop's "Select: Active Layers | All Layers".
+        lbl(ui, tl!("Select:"));
+        let mut scope = if o.path_select_all { "all" } else { "active" }.to_string();
+        let opts = [("active".to_string(), tl!("Active Layers")), ("all".to_string(), tl!("All Layers"))];
+        crate::widgets::dropdown(ui, "path-select-scope", &mut scope, &opts, 110.0);
+        o.path_select_all = scope == "all";
+        crate::widgets::vline(ui, 22.0);
+    }
     if tool == Tool::PathSelection {
+        if o.path_select_all && !app.ui.vector_mask_target {
+            lbl(ui, tl!("Click a shape to select it · Drag to move it"));
+            return true;
+        }
         lbl(ui, if app.ui.vector_mask_target { "Drag to move the targeted vector mask" } else { tl!("Drag to move the active shape's path or the Work Path") });
         return true;
     }
@@ -1854,3 +1894,7 @@ mod path_selection_tests;
 #[cfg(test)]
 #[path = "vector_paint_tests.rs"]
 mod paint_tests;
+
+#[cfg(test)]
+#[path = "shape_pick_tests.rs"]
+mod shape_pick_tests;

@@ -124,6 +124,15 @@ pub(crate) fn candidates(app: &PhotocraftApp) -> Vec<(PathRef, Path)> {
     layer.map(|(id, p)| (PathRef::Layer(id), p)).into_iter().chain(work.map(|p| (PathRef::Work, p))).collect()
 }
 
+/// Would a press at `p` take an anchor, handle or segment of a path Direct Selection shows now?
+pub(crate) fn hits_shown_path(app: &PhotocraftApp, p: [f64; 2], tol: f64) -> bool {
+    let ds = &app.ui.direct_selection;
+    candidates(app).into_iter().any(|(r, path)| {
+        let handles = if ds.target == Some(r) { shown_handles(ds, &path) } else { Vec::new() };
+        edit::hit(&path, Point::new(p[0], p[1]), tol, &handles).is_some()
+    })
+}
+
 fn retracted(k: &photocraft_doc::Knot, h: Handle) -> bool {
     let c = if h == Handle::In { k.in_ctrl } else { k.out_ctrl };
     (c.x - k.anchor.x).abs() < 1e-9 && (c.y - k.anchor.y).abs() < 1e-9

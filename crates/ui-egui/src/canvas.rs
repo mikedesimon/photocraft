@@ -4203,6 +4203,10 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
     }
     // Move tool: ⇧ locks the axis, ⌥ duplicates (move_mods.rs).
     let ev = crate::move_mods::filter_event(app, ev, mods);
+    // Path Selection / Direct Selection with "Select: All Layers" pick the shape under the press.
+    if let ToolEvent::Down { x, y, .. } = raw {
+        crate::vector_ui::pick_shape_on_press(app, [x, y]);
+    }
     // Direct Selection, and the Pen's ⌘ (Direct Selection) and ⌥ (Convert Point) modes (#790).
     if crate::direct_select::pointer(app, ev, mods) {
         return;

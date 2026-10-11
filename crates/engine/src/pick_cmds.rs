@@ -115,6 +115,76 @@ fn pick(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({ "layer": target.0 }))
 }
 
+/// The shape layer a Path Selection or Direct Selection click at (x, y) picks with "Select: All
+/// Layers": the topmost visible, not fully locked shape layer whose filled area contains the
+/// point, or whose outline (widened by its stroke) passes within `tol` of it. Unlike [`layers_at`] it
+/// tests the vector geometry, not pixels, so an unfilled shape is hit on its outline and a
+/// hairline stroke is as easy to click as a filled area.
+pub fn shape_at(doc: &Document, x: f64, y: f64, tol: f64) -> Option<LayerId> {
+    if !(x.is_finite() && y.is_finite()) {
+        return None;
+    }
+    let tol = if tol.is_finite() { tol.clamp(0.0, 1000.0) } else { 0.0 };
+    let (px, py) =
+        (x.floor().clamp(f64::from(i32::MIN / 2), f64::from(i32::MAX / 2)) as i32, y.floor().clamp(f64::from(i32::MIN / 2), f64::from(i32::MAX / 2)) as i32);
+    let p = photocraft_geom::Point::new(x, y);
+    for (path, _, l) in doc.walk().iter().rev() {
+        let LayerContent::Shape(sh) = &l.content else { continue };
+        if !(1..=path.len()).all(|n| doc.layer_at(&path[..n]).is_some_and(|a| a.visible)) || doc.effective_locks(l.id).all {
+            continue;
+        }
+        let board = path.first().and_then(|i| doc.layers.get(*i)).and_then(|t| t.artboard());
+        if board.is_some_and(|a| !a.rect.contains(px, py)) {
+            continue;
+        }
+        let hidden_by_mask = l.mask.as_ref().filter(|m| m.enabled).is_some_and(|m| {
+            let mut v = [0.0f32];
+            m.surface.read_pixel(px, py, &mut v);
+            v[0] <= 0.0
+        });
+        if hidden_by_mask {
+            continue;
+        }
+        // How far the stroke reaches past the path itself.
+        let reach = sh.stroke.as_ref().filter(|s| s.width.is_finite() && s.width > 0.0).map_or(0.0, |s| match s.align {
+            photocraft_doc::StrokeAlign::Inside => 0.0,
+            photocraft_doc::StrokeAlign::Center => f64::from(s.width) / 2.0,
+            photocraft_doc::StrokeAlign::Outside => f64::from(s.width),
+        });
+        let on_outline = photocraft_vector::edit::hit(&sh.path, p, tol + reach, &[]).is_some();
+        // An unfilled shape's inside is see-through: the click goes to what's behind it.
+        let inside = || sh.fill.is_some() && photocraft_vector::path_coverage(&sh.path, Rect::from_xywh(px, py, 1, 1)).first().is_some_and(|c| *c >= 0.5);
+        if on_outline || inside() {
+            return Some(l.id);
+        }
+    }
+    None
+}
+
+/// `shape.pickAt`: the click of Path Selection / Direct Selection with "Select: All Layers".
+fn pick_shape(s: &mut Session, p: &Value) -> Result<Value> {
+    let num = |k: &str| {
+        p.get(k)
+            .and_then(Value::as_f64)
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| EngineError::BadParams { cmd: "shape.pickAt".into(), msg: format!("missing or invalid `{k}`") })
+    };
+    let (x, y) = (num("x")?, num("y")?);
+    let tol = p.get("tolerance").and_then(Value::as_f64).unwrap_or(0.0);
+    let doc = s.active().ok_or(EngineError::NoDocument)?.doc.clone();
+    let Some(target) = shape_at(&doc, x, y, tol) else { return Ok(json!({ "layer": null })) };
+    if p.get("select").and_then(Value::as_bool).unwrap_or(true) {
+        let mode = p.get("mode").and_then(Value::as_str).unwrap_or("replace");
+        if !matches!(mode, "replace" | "add" | "toggle") {
+            return Err(EngineError::BadParams { cmd: "shape.pickAt".into(), msg: format!("unknown mode `{mode}`") });
+        }
+        if s.active().and_then(|st| st.active_layer) != Some(target) || mode != "replace" {
+            s.execute("layer.select", json!({"layer": target.0, "mode": mode}))?;
+        }
+    }
+    Ok(json!({ "layer": target.0 }))
+}
+
 /// Layers whose content touches document rect `r`, top to bottom: visible, not fully locked, not
 /// the locked Background (as Select › All Layers). A layer on an artboard counts only where the
 /// board shows it. With `group`, each counts as its outermost group (deduplicated).
@@ -197,6 +267,16 @@ pub fn specs() -> Vec<CommandSpec> {
             enabled: has_doc,
             journal: false,
             run: pick,
+        },
+        CommandSpec {
+            id: "shape.pickAt",
+            label: "Select Shape Layer at Point",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"x":px,"y":px,"tolerance":px=0 (how near the outline counts, in document px),"select":bool=true,"mode":"replace|toggle|add"="replace"} → {layer} (the topmost visible, unlocked shape layer whose filled area or stroked outline is there; null when none)"##,
+            enabled: has_doc,
+            journal: false,
+            run: pick_shape,
         },
     ]
 }
@@ -444,5 +524,73 @@ mod tests {
         }
         let mut empty = Session::new();
         assert!(empty.execute("layer.pickAt", json!({"x": 1, "y": 1})).is_err());
+    }
+
+    fn shape(s: &mut Session, params: Value) -> LayerId {
+        LayerId(s.execute("shape.create", params).unwrap()["layer"].as_u64().unwrap())
+    }
+
+    #[test]
+    fn shape_pick_takes_the_topmost_shape_by_geometry() {
+        let mut s = Session::new();
+        s.execute("file.new", json!({"width": 100, "height": 100})).unwrap();
+        let low = shape(&mut s, json!({"kind": "rect", "rect": [10, 10, 50, 50], "fill": "#ff0000"}));
+        let high = shape(&mut s, json!({"kind": "rect", "rect": [40, 40, 50, 50], "fill": "#0000ff"}));
+        // Where they overlap the front one wins; elsewhere each is hit inside its own area.
+        assert_eq!(s.execute("shape.pickAt", json!({"x": 45, "y": 45})).unwrap()["layer"], high.0);
+        assert_eq!(s.execute("shape.pickAt", json!({"x": 15, "y": 15})).unwrap()["layer"], low.0);
+        assert_eq!(s.active().unwrap().active_layer, Some(low));
+        // `select: false` only reports.
+        assert_eq!(s.execute("shape.pickAt", json!({"x": 85, "y": 85, "select": false})).unwrap()["layer"], high.0);
+        assert_eq!(s.active().unwrap().active_layer, Some(low));
+        // Empty canvas: nothing, and the selection stays.
+        assert!(s.execute("shape.pickAt", json!({"x": 5, "y": 95})).unwrap()["layer"].is_null());
+        assert_eq!(s.active().unwrap().active_layer, Some(low));
+    }
+
+    #[test]
+    fn shape_pick_skips_pixel_layers_hidden_and_locked_shapes() {
+        let mut s = Session::new();
+        s.execute("file.new", json!({"width": 60, "height": 60})).unwrap();
+        let sh = shape(&mut s, json!({"kind": "rect", "rect": [10, 10, 30, 30], "fill": "#ff0000"}));
+        // A pixel layer painted over the shape doesn't hide it from the shape pick.
+        s.execute("layer.new.layer", json!({"name": "Paint"})).unwrap();
+        s.execute("select.rect", json!({"x": 0, "y": 0, "width": 60, "height": 60})).unwrap();
+        s.execute("edit.fill", json!({"color": "#00ff00"})).unwrap();
+        s.execute("select.deselect", json!({})).unwrap();
+        assert_eq!(s.execute("shape.pickAt", json!({"x": 20, "y": 20, "select": false})).unwrap()["layer"], sh.0);
+        s.execute("layer.setProps", json!({"layer": sh.0, "locks": {"all": true}})).unwrap();
+        assert!(s.execute("shape.pickAt", json!({"x": 20, "y": 20, "select": false})).unwrap()["layer"].is_null());
+        s.execute("layer.setProps", json!({"layer": sh.0, "locks": {"all": false}, "visible": false})).unwrap();
+        assert!(s.execute("shape.pickAt", json!({"x": 20, "y": 20, "select": false})).unwrap()["layer"].is_null());
+    }
+
+    #[test]
+    fn shape_pick_hits_an_unfilled_shape_on_its_stroke() {
+        let mut s = Session::new();
+        s.execute("file.new", json!({"width": 100, "height": 100})).unwrap();
+        let back = shape(&mut s, json!({"kind": "rect", "rect": [0, 0, 100, 100], "fill": "#ffffff"}));
+        let ring = shape(&mut s, json!({"kind": "rect", "rect": [20, 20, 60, 60], "fill": null, "stroke": {"width": 6}}));
+        // On the stroke (3 px either side of the edge at x = 20), with no tolerance.
+        assert_eq!(s.execute("shape.pickAt", json!({"x": 18, "y": 50, "select": false})).unwrap()["layer"], ring.0);
+        // Well outside the stroke, the shape behind is hit; a tolerance reaches the ring.
+        assert_eq!(s.execute("shape.pickAt", json!({"x": 12, "y": 50, "select": false})).unwrap()["layer"], back.0);
+        assert_eq!(s.execute("shape.pickAt", json!({"x": 12, "y": 50, "tolerance": 6, "select": false})).unwrap()["layer"], ring.0);
+        // The ring has no fill: a click in its middle goes through to the shape behind.
+        assert_eq!(s.execute("shape.pickAt", json!({"x": 50, "y": 50, "select": false})).unwrap()["layer"], back.0);
+    }
+
+    #[test]
+    fn shape_pick_rejects_bad_params() {
+        let mut s = Session::new();
+        assert!(s.execute("shape.pickAt", json!({"x": 1, "y": 1})).is_err(), "no document");
+        s.execute("file.new", json!({"width": 20, "height": 20})).unwrap();
+        shape(&mut s, json!({"kind": "rect", "rect": [0, 0, 20, 20], "fill": "#ff0000"}));
+        for bad in [json!({}), json!({"x": "a", "y": 1}), json!({"x": 1, "y": 1, "mode": "explode"})] {
+            assert!(s.execute("shape.pickAt", bad.clone()).is_err(), "{bad}");
+        }
+        for odd in [json!({"x": 1e300, "y": -1e300}), json!({"x": 5, "y": 5, "tolerance": -4}), json!({"x": 5, "y": 5, "tolerance": 1e308})] {
+            assert!(s.execute("shape.pickAt", odd.clone()).is_ok(), "{odd}");
+        }
     }
 }

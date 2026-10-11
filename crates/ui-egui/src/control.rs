@@ -89,7 +89,7 @@ pub enum Outcome {
 /// field's value is validated before the first one is applied, so a typo, an unknown field, a
 /// bad value or a bad nested key can't reply with success while nothing — or only half of it —
 /// changed (#412).
-pub const UI_SET_FIELDS: [&str; 33] = [
+pub const UI_SET_FIELDS: [&str; 34] = [
     "tool",
     "panels",
     "dock",
@@ -118,6 +118,7 @@ pub const UI_SET_FIELDS: [&str; 33] = [
     "eyedropperSampleSize",
     "eyedropperSample",
     "eyedropperRing",
+    "pathSelectAll",
     "cropOverlay",
     "cropOverlayShow",
     "cropOverlayOrientation",
@@ -449,6 +450,8 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
                     None => None,
                 };
                 let eyedropper_ring = bool_field(p, "eyedropperRing")?;
+                // Path Selection / Direct Selection "Select: Active Layers | All Layers".
+                let path_select_all = bool_field(p, "pathSelectAll")?;
                 // The Crop tool's overlay menu (#1919).
                 let crop_overlay = match p.get("cropOverlay") {
                     Some(v) => Some(v.as_str().and_then(crate::crop_overlay::CropOverlay::from_id).ok_or_else(|| {
@@ -600,6 +603,9 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
                 }
                 if let Some(id) = eyedropper_sample {
                     app.ui.tool_options.eyedropper_sample = id;
+                }
+                if let Some(all) = path_select_all {
+                    app.ui.tool_options.path_select_all = all;
                 }
                 if let Some(ring) = eyedropper_ring {
                     app.ui.tool_options.eyedropper_ring = ring;
@@ -1755,6 +1761,18 @@ mod tests {
         let r = call(&mut app, &ctx, "ui.set", json!({"eyedropperSampleSize": 101, "eyedropperSample": "nope"}));
         assert_eq!(r["ok"], false, "{r}");
         assert_eq!(app.ui.tool_options.eyedropper_size, 1);
+    }
+
+    #[test]
+    fn ui_set_drives_path_select_all() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        let ctx = egui::Context::default();
+        let r = call(&mut app, &ctx, "ui.set", json!({"tool": "PathSelection", "pathSelectAll": true}));
+        assert_eq!(r["ok"], true, "{r}");
+        assert!(app.ui.tool_options.path_select_all);
+        let r = call(&mut app, &ctx, "ui.set", json!({"pathSelectAll": "all"}));
+        assert_eq!(r["ok"], false, "{r}");
+        assert!(app.ui.tool_options.path_select_all, "a rejected call changes nothing");
     }
 
     /// #1919: the Crop tool's overlay menu over the control channel, reported by `ui.inspect`.
