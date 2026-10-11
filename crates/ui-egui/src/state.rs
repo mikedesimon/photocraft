@@ -583,7 +583,8 @@ pub struct ToolOptions {
     pub move_show_transform: bool,
     /// Path Selection and Direct Selection: "Select: All Layers" (true) makes a click pick the
     /// shape layer under the pointer; "Active Layers" (false) edits only the active layer's path.
-    #[serde(default)]
+    /// On by default in this build (Fireworks-style object picking).
+    #[serde(default = "yes")]
     pub path_select_all: bool,
     /// Crop options bar: aspect ratio ("" = Ratio/unconstrained, "w:h", or "original") and
     /// Delete Cropped Pixels.
@@ -776,7 +777,7 @@ impl Default for ToolOptions {
             move_auto_select: true,
             move_target: default_move_target(),
             move_show_transform: false,
-            path_select_all: false,
+            path_select_all: true,
             crop_ratio: String::new(),
             crop_custom_ratio_width: 0.0,
             crop_custom_ratio_height: 0.0,
@@ -1005,6 +1006,9 @@ pub struct UiState {
     /// Path Selection with "Select: All Layers": the press hit no shape, so its drag moves nothing.
     #[serde(skip)]
     pub path_pick_missed: bool,
+    /// Direct Selection was entered by double-clicking a shape with Path Selection: Esc goes back.
+    #[serde(skip)]
+    pub point_edit_from_path_select: bool,
     /// Brush Preset picker opened by a right-click on the canvas or the options-bar brush chip:
     /// its screen position (points).
     #[serde(default)]
@@ -1180,6 +1184,7 @@ impl Default for UiState {
             mask_target: false,
             vector_mask_target: false,
             path_pick_missed: false,
+            point_edit_from_path_select: false,
             brush_picker: None,
             brush_picker_list: crate::brush_picker::list_state(),
             brush_picker_size: None,

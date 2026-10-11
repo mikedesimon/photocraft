@@ -16,15 +16,26 @@ pub(crate) struct LayerBox {
     end: [f64; 2],
     /// ⇧ at the press: add to the layer selection.
     add: bool,
+    /// Path Selection's marquee: selects shape layers only.
+    shapes: bool,
 }
 
 /// A Move-tool press that Auto-Select found nothing under: start the marquee at `p`. The press
 /// started a Move gesture's snapping and ⇧/⌥ handling, which a marquee has none of.
 pub(crate) fn begin(app: &mut PhotocraftApp, p: [f64; 2], add: bool) {
-    app.layer_box = Some(LayerBox { start: p, end: p, add });
+    app.layer_box = Some(LayerBox { start: p, end: p, add, shapes: false });
     app.prefs_rt.snap = None;
     app.prefs_rt.snap_lines.clear();
     app.move_mods = Default::default();
+}
+
+/// A Path Selection press ("Select: All Layers") that hit no shape: the marquee selects the shape
+/// layers it touches.
+pub(crate) fn begin_shapes(app: &mut PhotocraftApp, p: [f64; 2], add: bool) {
+    begin(app, p, add);
+    if let Some(b) = app.layer_box.as_mut() {
+        b.shapes = true;
+    }
 }
 
 /// No visible layer has pixels at document point `p` (locked ones included).
@@ -53,9 +64,10 @@ pub(crate) fn pointer(app: &mut PhotocraftApp, ev: ToolEvent) -> bool {
             if w == 0.0 || h == 0.0 {
                 return true;
             }
-            let target = app.ui.tool_options.move_target.clone();
+            let target = if b.shapes { "layer".to_string() } else { app.ui.tool_options.move_target.clone() };
             let mode = if b.add { "add" } else { "replace" };
-            let p = json!({"x": b.start[0], "y": b.start[1], "width": w, "height": h, "target": target, "mode": mode});
+            let kind = if b.shapes { "shape" } else { "any" };
+            let p = json!({"x": b.start[0], "y": b.start[1], "width": w, "height": h, "target": target, "mode": mode, "kind": kind});
             if let Err(e) = app.run("layer.selectInRect", p) {
                 app.ui.status = e;
                 app.ui.status_error = true;

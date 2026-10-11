@@ -178,7 +178,10 @@ fn pick_shape(s: &mut Session, p: &Value) -> Result<Value> {
         if !matches!(mode, "replace" | "add" | "toggle") {
             return Err(EngineError::BadParams { cmd: "shape.pickAt".into(), msg: format!("unknown mode `{mode}`") });
         }
-        if s.active().and_then(|st| st.active_layer) != Some(target) || mode != "replace" {
+        // As with Auto-Select, a plain press on one of several selected layers keeps them all
+        // selected, so the drag that follows moves them together.
+        let keeps = mode == "replace" && s.active().is_some_and(|st| st.is_layer_selected(target) && st.selected_layers().len() > 1);
+        if !keeps && (s.active().and_then(|st| st.active_layer) != Some(target) || mode != "replace") {
             s.execute("layer.select", json!({"layer": target.0, "mode": mode}))?;
         }
     }
@@ -230,8 +233,17 @@ fn select_in_rect(s: &mut Session, p: &Value) -> Result<Value> {
     // A rect dragged up or left has a negative size.
     let r = Rect::new(px(x.min(x + w).floor()), px(y.min(y + h).floor()), px(x.max(x + w).ceil()), px(y.max(y + h).ceil()));
     let doc = s.active().ok_or(EngineError::NoDocument)?.doc.clone();
-    let group = p.get("target").and_then(Value::as_str) == Some("group");
-    let hits = layers_in_rect(&doc, r, group);
+    let shapes = match p.get("kind").and_then(Value::as_str).unwrap_or("any") {
+        "any" => false,
+        "shape" => true,
+        other => return Err(EngineError::BadParams { cmd: "layer.selectInRect".into(), msg: format!("unknown kind `{other}`") }),
+    };
+    // Shape layers are picked themselves, never their groups.
+    let group = !shapes && p.get("target").and_then(Value::as_str) == Some("group");
+    let mut hits = layers_in_rect(&doc, r, group);
+    if shapes {
+        hits.retain(|id| doc.layer(*id).is_some_and(|l| matches!(l.content, LayerContent::Shape(_))));
+    }
     let add = match p.get("mode").and_then(Value::as_str).unwrap_or("replace") {
         "replace" => false,
         "add" => true,
@@ -253,7 +265,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Select Layers in Marquee",
             menu: &[],
             shortcut: None,
-            params: r##"{"x":px,"y":px,"width":px,"height":px,"target":"layer|group"="layer","mode":"replace|add"="replace"} → {layers} (the layers whose content touches the rect, topmost first; none leaves the selection as it is)"##,
+            params: r##"{"x":px,"y":px,"width":px,"height":px,"target":"layer|group"="layer","mode":"replace|add"="replace","kind":"any|shape"="any" (shape: shape layers only)} → {layers} (the layers whose content touches the rect, topmost first; none leaves the selection as it is)"##,
             enabled: has_doc,
             journal: true,
             run: select_in_rect,
@@ -578,6 +590,28 @@ mod tests {
         assert_eq!(s.execute("shape.pickAt", json!({"x": 12, "y": 50, "tolerance": 6, "select": false})).unwrap()["layer"], ring.0);
         // The ring has no fill: a click in its middle goes through to the shape behind.
         assert_eq!(s.execute("shape.pickAt", json!({"x": 50, "y": 50, "select": false})).unwrap()["layer"], back.0);
+    }
+
+    #[test]
+    fn select_in_rect_can_take_shapes_only_and_a_click_keeps_them() {
+        let mut s = Session::new();
+        s.execute("file.new", json!({"width": 100, "height": 100})).unwrap();
+        let a = shape(&mut s, json!({"kind": "rect", "rect": [10, 10, 20, 20], "fill": "#ff0000"}));
+        let b = shape(&mut s, json!({"kind": "rect", "rect": [50, 10, 20, 20], "fill": "#ff0000"}));
+        s.execute("layer.new.layer", json!({"name": "Paint"})).unwrap();
+        s.execute("select.rect", json!({"x": 30, "y": 40, "width": 10, "height": 10})).unwrap();
+        s.execute("edit.fill", json!({"color": "#00ff00"})).unwrap();
+        s.execute("select.deselect", json!({})).unwrap();
+        let rect = json!({"x": 0, "y": 0, "width": 90, "height": 60, "kind": "shape"});
+        let hits = s.execute("layer.selectInRect", rect).unwrap()["layers"].as_array().unwrap().len();
+        assert_eq!(hits, 2, "the pixel layer is left out");
+        let mut sel = s.active().unwrap().selected_layers();
+        sel.sort_by_key(|l| l.0);
+        assert_eq!(sel, vec![a, b]);
+        // A plain pick on one of the selected shapes keeps both.
+        s.execute("shape.pickAt", json!({"x": 15, "y": 15})).unwrap();
+        assert_eq!(s.active().unwrap().selected_layers().len(), 2);
+        assert!(s.execute("layer.selectInRect", json!({"x": 0, "y": 0, "width": 9, "height": 9, "kind": "circle"})).is_err());
     }
 
     #[test]

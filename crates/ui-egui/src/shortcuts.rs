@@ -491,6 +491,16 @@ pub fn handle(app: &mut PhotocraftApp, ctx: &egui::Context) {
     // brush picker, Rotate View, Adaptive Wide Angle, the Filter Gallery, the TIFF prompt, any
     // open egui popup and the toolbar tool flyout. A canvas drag in progress (a marquee being
     // drawn) keeps the selection too.
+    // Direct Selection entered by double-clicking a shape: Esc goes back to Path Selection.
+    if app.ui.point_edit_from_path_select
+        && app.ui.tool == Tool::DirectSelection
+        && app.drag.is_none()
+        && app.ui.direct_selection.drag.is_none()
+        && pressed(Key::Escape)
+    {
+        crate::vector_ui::leave_point_edit(app);
+        return;
+    }
     let esc_taken = app.ui.view.hides_chrome()
         || app.drag.is_some()
         || app.ui.palette_open

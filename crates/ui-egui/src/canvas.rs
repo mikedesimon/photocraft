@@ -3120,6 +3120,13 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
         if tool.is_type() && response.double_clicked() && !crate::type_transform::visible(app, crate::workspace_ui::sticky_mods(app, mods)) {
             crate::type_tool::select_word(app);
         }
+        // Path Selection: a double-click on a shape edits its points (Direct Selection); Esc returns.
+        if tool == Tool::PathSelection
+            && response.double_clicked()
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            crate::vector_ui::enter_point_edit(app, xf.to_doc(p));
+        }
     }
     if crop_camera && let (Some((center, rotation)), Some(now)) = (camera, app.ui.views.get(idx)) {
         if now.center != center {
@@ -3153,6 +3160,7 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
         let resizing = crate::brush_resize::draw(app, &painter, &xf);
         draw_transform_controls(app, &painter, &xf);
         crate::move_hover::draw(app, &painter, &xf, idx, response.hover_pos());
+        crate::shape_hover::draw(app, &painter, &xf, idx, response.hover_pos());
         crate::layer_pick_ui::show(app, &ctx);
         crate::canvas_tool_menu::show(app, &ctx);
         crate::snap_ui::draw(app, &painter, &xf);
@@ -4204,8 +4212,10 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
     // Move tool: ⇧ locks the axis, ⌥ duplicates (move_mods.rs).
     let ev = crate::move_mods::filter_event(app, ev, mods);
     // Path Selection / Direct Selection with "Select: All Layers" pick the shape under the press.
-    if let ToolEvent::Down { x, y, .. } = raw {
-        crate::vector_ui::pick_shape_on_press(app, [x, y]);
+    if let ToolEvent::Down { x, y, .. } = raw
+        && crate::vector_ui::pick_shape_on_press(app, [x, y], mods)
+    {
+        return;
     }
     // Direct Selection, and the Pen's ⌘ (Direct Selection) and ⌥ (Convert Point) modes (#790).
     if crate::direct_select::pointer(app, ev, mods) {

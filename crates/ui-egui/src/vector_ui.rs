@@ -506,33 +506,74 @@ pub(crate) fn free_transform_path(app: &PhotocraftApp) -> Option<(Value, Path)> 
 /// "Select: All Layers" with Path Selection or Direct Selection: a press first selects the shape
 /// layer under the pointer (`shape.pickAt`), so the drag that follows edits it. Direct Selection
 /// keeps the paths it already shows first: a press on one of their anchors, handles or segments
-/// edits that path even where another shape lies on top. Pen + ⌘ never picks.
-pub fn pick_shape_on_press(app: &mut PhotocraftApp, p: [f64; 2]) {
+/// edits that path even where another shape lies on top. Pen + ⌘ never picks. With Path
+/// Selection, ⇧ adds the shape to the selected layers, and a press on no shape starts a marquee
+/// that selects the shapes it touches (true: the press is the marquee's).
+pub fn pick_shape_on_press(app: &mut PhotocraftApp, p: [f64; 2], mods: egui::Modifiers) -> bool {
     let tool = app.ui.tool;
     app.ui.path_pick_missed = false;
+    if tool == Tool::PathSelection {
+        app.ui.point_edit_from_path_select = false;
+    }
     if !matches!(tool, Tool::PathSelection | Tool::DirectSelection)
         || !app.ui.tool_options.path_select_all
         || app.ui.vector_mask_target
         || app.ui.transform.is_some()
     {
-        return;
+        return false;
     }
     let tol = 6.0 / f64::from(app.point_zoom().max(0.01));
     if tool == Tool::DirectSelection && crate::direct_select::hits_shown_path(app, p, tol) {
-        return;
+        return false;
     }
-    match app.run("shape.pickAt", json!({"x": p[0], "y": p[1], "tolerance": tol})) {
-        Ok(v) => app.ui.path_pick_missed = tool == Tool::PathSelection && v["layer"].is_null(),
+    let mode = if tool == Tool::PathSelection && mods.shift { "add" } else { "replace" };
+    match app.run("shape.pickAt", json!({"x": p[0], "y": p[1], "tolerance": tol, "mode": mode})) {
+        Ok(v) if tool == Tool::PathSelection && v["layer"].is_null() => {
+            app.ui.path_pick_missed = true;
+            crate::move_box::begin_shapes(app, p, mods.shift);
+            true
+        }
+        Ok(_) => false,
         Err(e) => {
             app.ui.status = e;
             app.ui.status_error = true;
+            false
         }
     }
+}
+
+/// Path Selection double-click on a shape: edit its points with Direct Selection, the path shown
+/// with its anchors (none selected). Esc comes back (`leave_point_edit`).
+pub fn enter_point_edit(app: &mut PhotocraftApp, p: [f64; 2]) {
+    let tol = 6.0 / f64::from(app.point_zoom().max(0.01));
+    let hit = app.session.active().and_then(|st| photocraft_engine::pick_cmds::shape_at(&st.doc, p[0], p[1], tol));
+    let Some(id) = hit else { return };
+    if app.session.active().and_then(|st| st.active_layer) != Some(id) && app.run("layer.select", json!({"layer": id.0})).is_err() {
+        return;
+    }
+    app.ui.tool = Tool::DirectSelection;
+    app.ui.direct_selection = crate::direct_select::DirectSelection { target: Some(crate::direct_select::PathRef::Layer(id.0)), ..Default::default() };
+    app.ui.point_edit_from_path_select = true;
+}
+
+/// Esc from a double-click point edit: back to Path Selection with the shape still selected.
+pub fn leave_point_edit(app: &mut PhotocraftApp) {
+    app.ui.tool = Tool::PathSelection;
+    app.ui.direct_selection = Default::default();
+    app.ui.point_edit_from_path_select = false;
 }
 
 pub fn path_selection_finish(app: &mut PhotocraftApp, start: [f64; 2], end: [f64; 2]) {
     let (dx, dy) = (end[0] - start[0], end[1] - start[1]);
     if dx.abs() + dy.abs() < 0.5 || std::mem::take(&mut app.ui.path_pick_missed) {
+        return;
+    }
+    // Several layers selected (a marquee or ⇧-clicks): move them together, one history step.
+    if app.ui.tool_options.path_select_all && !app.ui.vector_mask_target && app.session.active().is_some_and(|st| st.selected_layers().len() > 1) {
+        if let Err(e) = app.run("layer.translate", json!({"dx": dx.round(), "dy": dy.round()})) {
+            app.ui.status = e;
+            app.ui.status_error = true;
+        }
         return;
     }
     let Some((target, path)) = target_path(app) else { return };

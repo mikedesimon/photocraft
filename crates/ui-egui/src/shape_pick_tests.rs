@@ -56,11 +56,12 @@ fn path_selection_all_layers_moves_the_clicked_shape() {
 }
 
 #[test]
-fn path_selection_active_layers_keeps_photoshops_default() {
+fn path_selection_active_layers_moves_the_active_shape() {
     let mut app = app(Tool::PathSelection);
     let a = shape(&mut app, [10, 10, 40, 40]);
     let b = shape(&mut app, [120, 120, 40, 40]);
-    assert!(!app.ui.tool_options.path_select_all, "Active Layers is the default");
+    assert!(app.ui.tool_options.path_select_all, "All Layers is this build's default");
+    app.ui.tool_options.path_select_all = false;
     drag(&mut app, [30.0, 30.0], [40.0, 30.0]);
     assert_eq!(active(&app), Some(b));
     assert_eq!(bounds(&app, a), [10, 10, 50, 50]);
@@ -68,7 +69,7 @@ fn path_selection_active_layers_keeps_photoshops_default() {
 }
 
 #[test]
-fn path_selection_drag_from_empty_canvas_moves_nothing() {
+fn path_selection_drag_from_empty_canvas_moves_nothing_and_selects_no_layer() {
     let mut app = app(Tool::PathSelection);
     let b = shape(&mut app, [120, 120, 40, 40]);
     app.ui.tool_options.path_select_all = true;
@@ -105,9 +106,75 @@ fn direct_selection_prefers_the_shown_path_over_a_shape_on_top() {
 }
 
 #[test]
-fn reset_tool_restores_active_layers() {
+fn reset_tool_restores_all_layers() {
     let mut app = app(Tool::PathSelection);
-    app.ui.tool_options.path_select_all = true;
+    app.ui.tool_options.path_select_all = false;
     crate::tool_reset::reset_options(&mut app.ui.tool_options, Tool::DirectSelection);
-    assert!(!app.ui.tool_options.path_select_all);
+    assert!(app.ui.tool_options.path_select_all);
+}
+
+fn selected(app: &PhotocraftApp) -> Vec<LayerId> {
+    let mut v = app.session.active().unwrap().selected_layers();
+    v.sort_by_key(|l| l.0);
+    v
+}
+
+fn drag_with(app: &mut PhotocraftApp, from: [f64; 2], to: [f64; 2], m: Modifiers) {
+    tool_event(app, ToolEvent::Down { x: from[0], y: from[1], pressure: 1.0 }, m);
+    tool_event(app, ToolEvent::Move { x: to[0], y: to[1], pressure: 1.0 }, m);
+    tool_event(app, ToolEvent::Up { x: to[0], y: to[1] }, m);
+}
+
+#[test]
+fn marquee_from_empty_canvas_selects_shapes_only_and_they_move_together() {
+    let mut app = app(Tool::PathSelection);
+    let a = shape(&mut app, [10, 10, 30, 30]);
+    let b = shape(&mut app, [60, 10, 30, 30]);
+    let far = shape(&mut app, [150, 150, 30, 30]);
+    // A pixel layer inside the box is left out.
+    app.run("layer.new.layer", json!({"name": "Paint"})).unwrap();
+    app.run("select.rect", json!({"x": 20, "y": 50, "width": 10, "height": 10})).unwrap();
+    app.run("edit.fill", json!({"color": "#00ff00"})).unwrap();
+    app.run("select.deselect", json!({})).unwrap();
+    drag_with(&mut app, [5.0, 5.0], [100.0, 70.0], Modifiers::NONE);
+    let mut want = vec![a, b];
+    want.sort_by_key(|l| l.0);
+    assert_eq!(selected(&app), want);
+    // A press on one of them keeps both selected, and the drag moves both in one step.
+    drag(&mut app, [20.0, 20.0], [25.0, 30.0]);
+    assert_eq!(selected(&app), want);
+    assert_eq!(bounds(&app, a), [15, 20, 45, 50]);
+    assert_eq!(bounds(&app, b), [65, 20, 95, 50]);
+    assert_eq!(bounds(&app, far), [150, 150, 180, 180]);
+}
+
+#[test]
+fn shift_click_adds_a_shape() {
+    let mut app = app(Tool::PathSelection);
+    let a = shape(&mut app, [10, 10, 30, 30]);
+    let b = shape(&mut app, [60, 10, 30, 30]);
+    drag(&mut app, [20.0, 20.0], [20.0, 20.0]);
+    assert_eq!(selected(&app), vec![a]);
+    drag_with(&mut app, [70.0, 20.0], [70.0, 20.0], Modifiers { shift: true, ..Default::default() });
+    let mut want = vec![a, b];
+    want.sort_by_key(|l| l.0);
+    assert_eq!(selected(&app), want);
+}
+
+#[test]
+fn double_click_edits_points_and_esc_returns() {
+    let mut app = app(Tool::PathSelection);
+    let a = shape(&mut app, [10, 10, 30, 30]);
+    shape(&mut app, [60, 10, 30, 30]);
+    crate::vector_ui::enter_point_edit(&mut app, [20.0, 20.0]);
+    assert_eq!(app.ui.tool, Tool::DirectSelection);
+    assert_eq!(active(&app), Some(a));
+    assert_eq!(app.ui.direct_selection.target, Some(crate::direct_select::PathRef::Layer(a.0)));
+    assert!(app.ui.point_edit_from_path_select);
+    crate::vector_ui::leave_point_edit(&mut app);
+    assert_eq!(app.ui.tool, Tool::PathSelection);
+    assert_eq!(active(&app), Some(a));
+    // A double-click on empty canvas stays in Path Selection.
+    crate::vector_ui::enter_point_edit(&mut app, [150.0, 150.0]);
+    assert_eq!(app.ui.tool, Tool::PathSelection);
 }
